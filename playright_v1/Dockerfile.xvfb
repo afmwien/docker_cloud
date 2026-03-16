@@ -52,8 +52,10 @@ RUN chmod +x /app/scripts/startup.sh
 
 # ---- Anwendungscode ----
 COPY src/ /app/src/
-COPY config/settings.json /app/config/settings.json
+COPY config/ /app/config/
 COPY api_server.py /app/api_server.py
+
+ENV PYTHONPATH=/app/src:/app
 
 # ---- Output-Verzeichnis ----
 RUN mkdir -p /app/output/screenshots
