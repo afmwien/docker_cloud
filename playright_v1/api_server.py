@@ -33,6 +33,31 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 OUTPUT_DIR = Path("/app/output/screenshots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# Idle-Timeout: Container beendet sich nach 1 Stunde Inaktivität
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("IDLE_TIMEOUT", "3600"))
+_last_activity = time.time()
+
+
+async def _idle_watchdog():
+    """Hintergrund-Task: beendet den Prozess nach IDLE_TIMEOUT_SECONDS Inaktivität."""
+    while True:
+        await asyncio.sleep(60)  # Jede Minute prüfen
+        idle = time.time() - _last_activity
+        if idle >= IDLE_TIMEOUT_SECONDS:
+            print(f"Idle-Timeout ({IDLE_TIMEOUT_SECONDS}s) erreicht. Container fährt herunter.")
+            os._exit(0)
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(_idle_watchdog())
+
+
+def _touch_activity():
+    """Aktualisiert den letzten Aktivitäts-Zeitstempel."""
+    global _last_activity
+    _last_activity = time.time()
+
 
 def _maximize_window(display: str):
     """Maximiert das aktive Fenster auf dem Xvfb-Desktop."""
@@ -71,7 +96,15 @@ def _maximize_window(display: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "display": DISPLAY}
+    _touch_activity()
+    idle = int(time.time() - _last_activity)
+    remaining = max(0, IDLE_TIMEOUT_SECONDS - idle)
+    return {
+        "status": "healthy",
+        "display": DISPLAY,
+        "idle_timeout": IDLE_TIMEOUT_SECONDS,
+        "remaining_seconds": remaining,
+    }
 
 
 def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
@@ -238,10 +271,12 @@ async def search_image(
     2. Playwright Viewport → zum Bild scrollen
     3. Xvfb Desktop-Screenshot → echte Browseransicht mit Adressleiste
     """
+    _touch_activity()
     job_id = uuid.uuid4().hex[:8]
     ref_data = await reference.read()
 
     result = await asyncio.to_thread(_run_search, url, ref_data, threshold, job_id)
+    _touch_activity()
 
     if not result.get("success"):
         return JSONResponse(status_code=404, content=result)
