@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  image-finder:
+    build:
+      context: .
+      dockerfile: Dockerfile.xvfb
+    container_name: image-finder-desktop
+    ports:
+      - "8080:8080"   # FastAPI
+      - "6080:6080"   # noVNC Web-Client
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCREEN_WIDTH=1920
+      - SCREEN_HEIGHT=1080
+      - SCREEN_DEPTH=24
+    volumes:
+      - ./output:/app/output
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    restart: unless-stopped

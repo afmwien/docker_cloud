@@ -35,7 +35,9 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/${{ env.SERVICE_NAME }}:${{ github.sha }} .
+          docker build -f playright_v1/Dockerfile.xvfb \
+            -t ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            playright_v1/
           docker tag ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/${{ env.SERVICE_NAME }}:${{ github.sha }} \
                      ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/${{ env.SERVICE_NAME }}:latest
 
@@ -50,4 +52,4 @@ jobs:
           service: ${{ env.SERVICE_NAME }}
           region: ${{ env.REGION }}
           image: ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/docker-repo/${{ env.SERVICE_NAME }}:${{ github.sha }}
-          flags: --allow-unauthenticated --port=8080
+          flags: --allow-unauthenticated --port=8080 --cpu=2 --memory=2Gi --no-cpu-throttling --min-instances=0 --max-instances=3 --timeout=300

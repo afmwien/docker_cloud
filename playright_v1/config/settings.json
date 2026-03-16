@@ -1,0 +1,18 @@
+{
+    "chrome_profile": {
+        "use_project_profile": true,
+        "project_profile_path": "data/chrome_profile",
+        "external_profile_path": null
+    },
+    "browser": {
+        "headless": true,
+        "viewport_width": 1920,
+        "viewport_height": 1080,
+        "locale": "de-DE",
+        "timezone": "Europe/Vienna"
+    },
+    "cookies": {
+        "auto_accept": true,
+        "save_storage_state": true
+    }
+}

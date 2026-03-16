@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  playwright-app:
+    build: .
+    container_name: playwright_v1
+    # Umgebungsvariablen
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Volumes für Daten, die persistiert werden sollen
+    volumes:
+      - ./data:/app/data
+      - ./screenshots:/app/screenshots
+    # Neustart-Policy
+    restart: unless-stopped

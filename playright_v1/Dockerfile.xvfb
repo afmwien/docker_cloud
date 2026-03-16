@@ -1,0 +1,67 @@
+# ============================================================
+# Xvfb + Fluxbox + noVNC + Chromium Desktop-Container
+# ============================================================
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV DISPLAY=:99
+ENV SCREEN_WIDTH=1920
+ENV SCREEN_HEIGHT=1080
+ENV SCREEN_DEPTH=24
+
+# ---- Systempakete ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python
+    python3 python3-pip python3-venv \
+    # Xvfb + Window Manager
+    xvfb fluxbox \
+    # VNC
+    x11vnc \
+    # noVNC + Websockify
+    novnc websockify \
+    # Screenshot-Tools
+    scrot imagemagick \
+    # Chromium
+    chromium-browser fonts-liberation fonts-noto-color-emoji \
+    # Prozess-Manager
+    supervisor \
+    # Utilities
+    xdotool wmctrl curl dbus-x11 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- Python-Abhängigkeiten ----
+WORKDIR /app
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt \
+    && playwright install chromium \
+    && playwright install-deps chromium
+
+# ---- noVNC konfigurieren ----
+RUN ln -sf /usr/share/novnc/vnc.html /usr/share/novnc/index.html
+
+# ---- Fluxbox-Konfiguration ----
+RUN mkdir -p /root/.fluxbox
+COPY config/fluxbox/ /root/.fluxbox/
+
+# ---- Supervisor-Konfiguration ----
+COPY config/supervisord.conf /etc/supervisor/conf.d/app.conf
+
+# ---- Startup-Script ----
+COPY scripts/startup.sh /app/scripts/startup.sh
+RUN chmod +x /app/scripts/startup.sh
+
+# ---- Anwendungscode ----
+COPY src/ /app/src/
+COPY config/settings.json /app/config/settings.json
+COPY api_server.py /app/api_server.py
+
+# ---- Output-Verzeichnis ----
+RUN mkdir -p /app/output/screenshots
+
+# ---- Ports ----
+# 8080 = FastAPI (Cloud Run)
+# 6080 = noVNC Web-Client
+EXPOSE 8080 6080
+
+# ---- Start ----
+CMD ["/app/scripts/startup.sh"]
