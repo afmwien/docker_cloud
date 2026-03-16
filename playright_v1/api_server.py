@@ -190,33 +190,58 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         best_match = None
         checked = 0
         debug_distances = []
+        skipped = {"no_src": 0, "small_natural": 0, "download_fail": 0, "open_fail": 0, "small_img": 0}
+        download_headers = {
+            "Accept": "image/jpeg, image/png, image/*;q=0.9, */*;q=0.5",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": url,
+        }
         for i, img in enumerate(images):
             # Bevorzuge Original-src über currentSrc (vermeidet WebP von <picture>)
             src = img["src"] or img["currentSrc"] or img["dataSrc"]
-            if not src or img["naturalWidth"] < 10:
+            if not src or src.startswith("data:"):
+                skipped["no_src"] += 1
+                print(f"  [{i}] SKIP: no src or data-uri")
+                continue
+            # naturalWidth=0 bei Lazy-Load → trotzdem versuchen wenn displayWidth > 0
+            if img["naturalWidth"] < 10 and img["displayWidth"] < 10:
+                skipped["small_natural"] += 1
+                print(f"  [{i}] SKIP: too small natural={img['naturalWidth']} display={img['displayWidth']} src={src[:80]}")
                 continue
             try:
-                # Accept-Header: JPEG/PNG bevorzugen, WebP vermeiden (Content Negotiation)
-                resp = req.get(
-                    src, timeout=10, verify=False,
-                    headers={"Accept": "image/jpeg, image/png, image/*;q=0.9, */*;q=0.5"},
-                )
-                if resp.status_code == 200 and len(resp.content) > 500:
+                resp = req.get(src, timeout=10, verify=False, headers=download_headers)
+                if resp.status_code != 200:
+                    skipped["download_fail"] += 1
+                    print(f"  [{i}] SKIP: HTTP {resp.status_code} src={src[:80]}")
+                    continue
+                if len(resp.content) < 500:
+                    skipped["download_fail"] += 1
+                    print(f"  [{i}] SKIP: too small ({len(resp.content)} bytes) src={src[:80]}")
+                    continue
+                try:
                     web_img = Image.open(BytesIO(resp.content))
-                    if web_img.size[0] > 10:
-                        # Konvertiere beide zu RGB für konsistenten Vergleich
-                        web_rgb = web_img.convert("RGB")
-                        dist = ref_hash - imagehash.phash(web_rgb, hash_size=16)
-                        checked += 1
-                        debug_distances.append({"src": src[:120], "distance": int(dist), "format": web_img.format})
-                        print(f"  [{i}] dist={dist} fmt={web_img.format} size={web_img.size} src={src[:100]}")
-                        if dist <= threshold and (best_match is None or dist < best_match["dist"]):
-                            best_match = {"index": i, "dist": dist, "img": img, "src": src}
+                except Exception as img_err:
+                    skipped["open_fail"] += 1
+                    print(f"  [{i}] SKIP: PIL open failed: {img_err} src={src[:80]}")
+                    continue
+                if web_img.size[0] < 10:
+                    skipped["small_img"] += 1
+                    print(f"  [{i}] SKIP: decoded too small {web_img.size} src={src[:80]}")
+                    continue
+                # Konvertiere beide zu RGB für konsistenten Vergleich
+                web_rgb = web_img.convert("RGB")
+                dist = ref_hash - imagehash.phash(web_rgb, hash_size=16)
+                checked += 1
+                debug_distances.append({"src": src[:120], "distance": int(dist), "format": web_img.format})
+                print(f"  [{i}] dist={dist} fmt={web_img.format} size={web_img.size} src={src[:100]}")
+                if dist <= threshold and (best_match is None or dist < best_match["dist"]):
+                    best_match = {"index": i, "dist": dist, "img": img, "src": src}
             except Exception as e:
+                skipped["download_fail"] += 1
                 print(f"  [{i}] FEHLER: {e} src={src[:100]}")
                 continue
 
-        print(f"Hash-Vergleich abgeschlossen: {checked} Bilder geprüft, best_match={best_match is not None}")
+        print(f"Hash-Vergleich: {checked}/{len(images)} verglichen, skipped={skipped}, match={best_match is not None}")
 
         if not best_match:
             return {
@@ -224,6 +249,7 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
                 "message": f"Kein Bild mit Distanz <= {threshold} gefunden",
                 "images_checked": len(images),
                 "images_compared": checked,
+                "skipped": skipped,
                 "distances": sorted(debug_distances, key=lambda d: d["distance"])[:10],
             }
 
