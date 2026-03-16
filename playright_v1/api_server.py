@@ -12,6 +12,7 @@ import os
 import uuid
 import time
 import subprocess
+import asyncio
 from pathlib import Path
 from io import BytesIO
 
@@ -19,6 +20,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from PIL import Image
 import imagehash
+import requests as req
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -37,30 +39,16 @@ async def health():
     return {"status": "healthy", "display": DISPLAY}
 
 
-@app.post("/search")
-async def search_image(
-    url: str = Form(..., description="Website-URL zum Durchsuchen"),
-    reference: UploadFile = File(..., description="Referenzbild (JPG/PNG)"),
-    threshold: int = Form(20, description="Max Hash-Distanz (0=identisch, <20=ähnlich)"),
-):
-    """
-    3-Ebenen Bildsuche:
-    1. Headless-Crawl → Bilder sammeln + Hash-Vergleich
-    2. Playwright Viewport → zum Bild scrollen
-    3. Xvfb Desktop-Screenshot → echte Browseransicht mit Adressleiste
-    """
-    job_id = uuid.uuid4().hex[:8]
+def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
+    """Synchrone Bildsuche – läuft in separatem Thread."""
+    from playwright.sync_api import sync_playwright
 
-    # Referenzbild laden und hashen
-    ref_data = await reference.read()
     ref_img = Image.open(BytesIO(ref_data))
     ref_hash = imagehash.phash(ref_img, hash_size=16)
 
-    from playwright.sync_api import sync_playwright
-
     with sync_playwright() as p:
-        # ---- PHASE 1: Headless Crawl (Bilder finden) ----
-        browser_hl = p.chromium.launch(headless=True)
+        # ---- PHASE 1: Headless Crawl ----
+        browser_hl = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx_hl = browser_hl.new_context(**get_stealth_context_options())
         page_hl = ctx_hl.new_page()
         apply_stealth_settings(page_hl)
@@ -71,7 +59,6 @@ async def search_image(
             page_hl.goto(url, wait_until="domcontentloaded", timeout=30000)
         page_hl.wait_for_timeout(2000)
 
-        # Scrollen für Lazy-Loading
         page_height = page_hl.evaluate("document.documentElement.scrollHeight")
         viewport_h = page_hl.evaluate("window.innerHeight")
         pos = 0
@@ -84,7 +71,6 @@ async def search_image(
         page_hl.evaluate("window.scrollTo(0, 0)")
         page_hl.wait_for_timeout(500)
 
-        # Bilder sammeln
         images = page_hl.evaluate("""() => {
             const imgs = [];
             document.querySelectorAll('img').forEach(img => {
@@ -103,13 +89,10 @@ async def search_image(
             });
             return imgs;
         }""")
-
         browser_hl.close()
 
         # Hash-Vergleich
-        import requests as req
         best_match = None
-
         for i, img in enumerate(images):
             src = img["currentSrc"] or img["src"] or img["dataSrc"]
             if not src or img["naturalWidth"] < 10:
@@ -126,13 +109,13 @@ async def search_image(
                 continue
 
         if not best_match:
-            return JSONResponse(status_code=404, content={
+            return {
                 "success": False,
                 "message": f"Kein Bild mit Distanz <= {threshold} gefunden",
                 "images_checked": len(images),
-            })
+            }
 
-        # ---- PHASE 2+3: Headed Browser auf Xvfb → Desktop-Screenshot ----
+        # ---- PHASE 2+3: Headed Browser → Desktop-Screenshot ----
         browser = p.chromium.launch(
             headless=False,
             args=[
@@ -144,7 +127,7 @@ async def search_image(
         )
         ctx = browser.new_context(
             **get_stealth_context_options(),
-            no_viewport=True,  # Nutzt die tatsächliche Fenstergröße
+            no_viewport=True,
         )
         page = ctx.new_page()
         apply_stealth_settings(page)
@@ -155,7 +138,6 @@ async def search_image(
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(3000)
 
-        # Scrollen für Lazy-Loading
         page_height = page.evaluate("document.documentElement.scrollHeight")
         viewport_h = page.evaluate("window.innerHeight")
         pos = 0
@@ -165,14 +147,12 @@ async def search_image(
             pos += viewport_h - 100
             page_height = page.evaluate("document.documentElement.scrollHeight")
 
-        # Zum gefundenen Bild scrollen (zentriert im Viewport)
         img_y = best_match["img"]["y"]
         img_h = best_match["img"]["displayHeight"]
         scroll_to = max(0, img_y - (viewport_h - img_h) // 2)
         page.evaluate(f"window.scrollTo(0, {scroll_to})")
         page.wait_for_timeout(2000)
 
-        # Fenster maximieren via xdotool
         try:
             subprocess.run(
                 ["xdotool", "key", "super+Up"],
@@ -183,16 +163,10 @@ async def search_image(
         except Exception:
             pass
 
-        # ---- Desktop-Screenshot (Xvfb Framebuffer) ----
         screenshot_name = f"desktop_{job_id}.png"
         screenshot_path = OUTPUT_DIR / screenshot_name
+        desktop_result = capture_xvfb_desktop(str(screenshot_path), DISPLAY)
 
-        desktop_result = capture_xvfb_desktop(
-            output_path=str(screenshot_path),
-            display=DISPLAY
-        )
-
-        # Auch einen Playwright-Viewport-Screenshot (Ebene 2)
         viewport_name = f"viewport_{job_id}.png"
         viewport_path = OUTPUT_DIR / viewport_name
         page.screenshot(path=str(viewport_path))
@@ -214,6 +188,28 @@ async def search_image(
         },
         "images_checked": len(images),
     }
+
+
+@app.post("/search")
+async def search_image(
+    url: str = Form(..., description="Website-URL zum Durchsuchen"),
+    reference: UploadFile = File(..., description="Referenzbild (JPG/PNG)"),
+    threshold: int = Form(20, description="Max Hash-Distanz (0=identisch, <20=ähnlich)"),
+):
+    """
+    3-Ebenen Bildsuche:
+    1. Headless-Crawl → Bilder sammeln + Hash-Vergleich
+    2. Playwright Viewport → zum Bild scrollen
+    3. Xvfb Desktop-Screenshot → echte Browseransicht mit Adressleiste
+    """
+    job_id = uuid.uuid4().hex[:8]
+    ref_data = await reference.read()
+
+    result = await asyncio.to_thread(_run_search, url, ref_data, threshold, job_id)
+
+    if not result.get("success"):
+        return JSONResponse(status_code=404, content=result)
+    return result
 
 
 @app.get("/screenshots/{filename}")
