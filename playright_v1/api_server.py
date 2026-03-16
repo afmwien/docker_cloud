@@ -13,11 +13,14 @@ import uuid
 import time
 import subprocess
 import asyncio
+import hmac
 from pathlib import Path
 from io import BytesIO
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Security, Depends
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from PIL import Image
 import imagehash
 import requests as req
@@ -28,6 +31,28 @@ from browser.stealth import apply_stealth_settings, get_stealth_context_options
 from screenshot.xvfb_screenshot import capture_xvfb_desktop
 
 app = FastAPI(title="Image Finder Desktop", version="1.0.0")
+
+# CORS: Erlaubt Anfragen von anderen Domains
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# API-Key Authentifizierung
+API_KEY = os.environ.get("API_KEY", "")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    """Prüft den API-Key. Wenn kein API_KEY gesetzt ist, ist alles erlaubt."""
+    if not API_KEY:
+        return  # Kein Key konfiguriert → alles erlaubt
+    if not api_key or not hmac.compare_digest(api_key, API_KEY):
+        raise HTTPException(status_code=403, detail="Ungültiger API-Key")
 
 DISPLAY = os.environ.get("DISPLAY", ":99")
 OUTPUT_DIR = Path("/app/output/screenshots")
@@ -259,7 +284,7 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
     }
 
 
-@app.post("/search")
+@app.post("/search", dependencies=[Depends(verify_api_key)])
 async def search_image(
     url: str = Form(..., description="Website-URL zum Durchsuchen"),
     reference: UploadFile = File(..., description="Referenzbild (JPG/PNG)"),
@@ -283,7 +308,7 @@ async def search_image(
     return result
 
 
-@app.get("/screenshots/{filename}")
+@app.get("/screenshots/{filename}", dependencies=[Depends(verify_api_key)])
 async def get_screenshot(filename: str):
     """Screenshot-Datei abrufen."""
     # Nur Dateinamen zulassen (kein Path-Traversal)
