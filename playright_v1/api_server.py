@@ -34,6 +34,41 @@ OUTPUT_DIR = Path("/app/output/screenshots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _maximize_window(display: str):
+    """Maximiert das aktive Fenster auf dem Xvfb-Desktop."""
+    env = {**os.environ, "DISPLAY": display}
+    try:
+        # Warte bis ein Fenster sichtbar ist
+        subprocess.run(
+            ["xdotool", "search", "--onlyvisible", "--name", ".", "windowactivate", "--sync"],
+            env=env, timeout=5, capture_output=True,
+        )
+        # Aktives Fenster finden und maximieren
+        result = subprocess.run(
+            ["xdotool", "getactivewindow"],
+            env=env, timeout=5, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            wid = result.stdout.strip()
+            # Fensterdekorationen entfernen und Vollbild auf dem gesamten Screen
+            screen_w = os.environ.get("SCREEN_WIDTH", "1920")
+            screen_h = os.environ.get("SCREEN_HEIGHT", "1080")
+            subprocess.run(
+                ["wmctrl", "-i", "-r", wid, "-b", "add,maximized_vert,maximized_horz"],
+                env=env, timeout=5, capture_output=True,
+            )
+            subprocess.run(
+                ["xdotool", "windowsize", wid, screen_w, screen_h],
+                env=env, timeout=5, capture_output=True,
+            )
+            subprocess.run(
+                ["xdotool", "windowmove", wid, "0", "0"],
+                env=env, timeout=5, capture_output=True,
+            )
+    except Exception:
+        pass
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "display": DISPLAY}
@@ -116,11 +151,13 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
             }
 
         # ---- PHASE 2+3: Headed Browser → Desktop-Screenshot ----
+        screen_w = os.environ.get('SCREEN_WIDTH', '1920')
+        screen_h = os.environ.get('SCREEN_HEIGHT', '1080')
         browser = p.chromium.launch(
             headless=False,
             args=[
                 "--start-maximized",
-                f"--window-size={os.environ.get('SCREEN_WIDTH', '1920')},{os.environ.get('SCREEN_HEIGHT', '1080')}",
+                f"--window-size={screen_w},{screen_h}",
                 "--disable-gpu",
                 "--no-sandbox",
             ]
@@ -132,11 +169,20 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         page = ctx.new_page()
         apply_stealth_settings(page)
 
+        # Fenster sofort maximieren bevor die Seite geladen wird
+        time.sleep(1)
+        _maximize_window(DISPLAY)
+        time.sleep(0.5)
+
         try:
             page.goto(url, wait_until="networkidle", timeout=30000)
         except Exception:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(2000)
+
+        # Nochmals maximieren nach dem Laden
+        _maximize_window(DISPLAY)
+        time.sleep(0.5)
 
         page_height = page.evaluate("document.documentElement.scrollHeight")
         viewport_h = page.evaluate("window.innerHeight")
@@ -152,16 +198,6 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         scroll_to = max(0, img_y - (viewport_h - img_h) // 2)
         page.evaluate(f"window.scrollTo(0, {scroll_to})")
         page.wait_for_timeout(2000)
-
-        try:
-            subprocess.run(
-                ["xdotool", "key", "super+Up"],
-                env={**os.environ, "DISPLAY": DISPLAY},
-                timeout=5,
-            )
-            time.sleep(0.5)
-        except Exception:
-            pass
 
         screenshot_name = f"desktop_{job_id}.png"
         screenshot_path = OUTPUT_DIR / screenshot_name
