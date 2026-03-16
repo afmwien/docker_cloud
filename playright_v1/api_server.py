@@ -399,7 +399,7 @@ async def search_image(
     return result
 
 
-def _run_screenshot(url: str, mode: str, scroll_to: int, job_id: str) -> dict:
+def _run_screenshot(url: str, mode: str, scroll_to: int, full_page: bool, job_id: str) -> dict:
     """Reiner Screenshot ohne Bildvergleich – läuft in separatem Thread."""
     from playwright.sync_api import sync_playwright
 
@@ -463,7 +463,7 @@ def _run_screenshot(url: str, mode: str, scroll_to: int, job_id: str) -> dict:
         else:
             filename = f"viewport_{job_id}.png"
             filepath = OUTPUT_DIR / filename
-            page.screenshot(path=str(filepath), full_page=False)
+            page.screenshot(path=str(filepath), full_page=full_page)
 
         browser.close()
 
@@ -476,6 +476,7 @@ def _run_screenshot(url: str, mode: str, scroll_to: int, job_id: str) -> dict:
         "success": True,
         "job_id": job_id,
         "mode": mode,
+        "full_page": full_page,
         "screenshot": f"/screenshots/{filename}",
         "screenshot_base64": screenshot_b64,
     }
@@ -486,11 +487,13 @@ async def take_screenshot(
     url: str = Form(..., description="Website-URL"),
     mode: str = Form("desktop", description="Screenshot-Modus: 'desktop' oder 'viewport'"),
     scroll_to: int = Form(0, description="Scroll-Position in Pixeln (0 = Seitenanfang)"),
+    full_page: bool = Form(False, description="Gesamte Seite erfassen (nur bei mode=viewport)"),
 ):
     """
     Reiner Screenshot ohne Bildvergleich.
     - desktop:  Xvfb-Framebuffer (echte Browseransicht mit Adressleiste)
     - viewport: Playwright-Viewport (nur Seiteninhalt, ohne Browser-Chrome)
+    - full_page: Bei viewport=true wird die gesamte Seite erfasst (scroll_to wird ignoriert)
     """
     _touch_activity()
 
@@ -498,7 +501,7 @@ async def take_screenshot(
         raise HTTPException(status_code=400, detail="mode muss 'desktop' oder 'viewport' sein")
 
     job_id = uuid.uuid4().hex[:8]
-    result = await asyncio.to_thread(_run_screenshot, url, mode, scroll_to, job_id)
+    result = await asyncio.to_thread(_run_screenshot, url, mode, scroll_to, full_page, job_id)
     _touch_activity()
 
     if not result.get("success"):

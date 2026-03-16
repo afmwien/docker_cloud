@@ -40,11 +40,11 @@ def search_image(website_url, reference_image_path, threshold=20):
         )
     return response.json()
 
-def take_screenshot(website_url, mode="desktop", scroll_to=0):
+def take_screenshot(website_url, mode="desktop", scroll_to=0, full_page=False):
     response = requests.post(
         f"{settings.IMAGE_FINDER_API_URL}/screenshot",
         headers={"X-API-Key": settings.IMAGE_FINDER_API_KEY},
-        data={"url": website_url, "mode": mode, "scroll_to": scroll_to},
+        data={"url": website_url, "mode": mode, "scroll_to": scroll_to, "full_page": full_page},
         timeout=120,
     )
     return response.json()
@@ -94,8 +94,8 @@ else:
 # --- Reiner Screenshot (ohne Bildvergleich) ---
 shot = take_screenshot(
     website_url="https://www.maisai.at/fotos/",
-    mode="desktop",     # oder "viewport"
-    scroll_to=0,        # Pixel von oben
+    mode="viewport",    # oder "desktop"
+    full_page=True,     # gesamte Seite (langes Bild)
 )
 
 if shot["success"]:
@@ -115,9 +115,11 @@ POST /screenshot  (form-data)
   url        (string, Pflicht)    – Website-URL
   mode       (string, default="desktop") – "desktop" oder "viewport"
   scroll_to  (int,    default=0)  – Scroll-Position in Pixeln (0 = Seitenanfang)
+  full_page  (bool,   default=false) – Gesamte Seite erfassen (nur bei mode=viewport)
 
-  desktop  = Xvfb-Framebuffer (echte Browseransicht mit Adressleiste)
-  viewport = Playwright-Viewport (nur Seiteninhalt, ohne Browser-Chrome)
+  desktop   = Xvfb-Framebuffer (echte Browseransicht mit Adressleiste)
+  viewport  = Playwright-Viewport (nur Seiteninhalt, ohne Browser-Chrome)
+  full_page = Ganzseitig: erzeugt ein langes Bild der gesamten Seite (scroll_to wird ignoriert)
 
 API-ANTWORT ERFOLG (HTTP 200)
 ==============================
