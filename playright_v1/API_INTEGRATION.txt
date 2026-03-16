@@ -1,0 +1,179 @@
+====================================================================
+  Cloud Run Image Finder API – Integrationsleitfaden für Django
+====================================================================
+
+VERBINDUNGSDATEN
+================
+API-URL:  https://docker-cloud-app-14602204356.europe-west1.run.app
+Auth:     Header "X-API-Key" (Wert aus .env)
+
+ENDPOINTS
+=========
+GET  /health                  → Health-Check (kein Key nötig)
+POST /search                  → Bildsuche (Key erforderlich)
+POST /screenshot              → Reiner Screenshot ohne Bildvergleich (Key erforderlich)
+GET  /screenshots/{filename}  → Screenshot abrufen (Key erforderlich)
+
+.ENV EINTRAGEN
+==============
+IMAGE_FINDER_API_KEY=75b3798ba085fa79d71f8bc3f176767422f6fa7781a98c49cbaf483a65bf3099
+IMAGE_FINDER_API_URL=https://docker-cloud-app-14602204356.europe-west1.run.app
+
+SETTINGS.PY
+============
+IMAGE_FINDER_API_KEY = os.environ.get("IMAGE_FINDER_API_KEY")
+IMAGE_FINDER_API_URL = os.environ.get("IMAGE_FINDER_API_URL")
+
+SERVICE (services/image_finder.py)
+===================================
+import requests
+from django.conf import settings
+
+def search_image(website_url, reference_image_path, threshold=20):
+    with open(reference_image_path, "rb") as f:
+        response = requests.post(
+            f"{settings.IMAGE_FINDER_API_URL}/search",
+            headers={"X-API-Key": settings.IMAGE_FINDER_API_KEY},
+            files={"reference": f},
+            data={"url": website_url, "threshold": threshold},
+            timeout=120,
+        )
+    return response.json()
+
+def take_screenshot(website_url, mode="desktop", scroll_to=0):
+    response = requests.post(
+        f"{settings.IMAGE_FINDER_API_URL}/screenshot",
+        headers={"X-API-Key": settings.IMAGE_FINDER_API_KEY},
+        data={"url": website_url, "mode": mode, "scroll_to": scroll_to},
+        timeout=120,
+    )
+    return response.json()
+
+def download_screenshot(screenshot_path):
+    response = requests.get(
+        f"{settings.IMAGE_FINDER_API_URL}{screenshot_path}",
+        headers={"X-API-Key": settings.IMAGE_FINDER_API_KEY},
+        timeout=30,
+    )
+    return response.content
+
+VERWENDUNG IM VIEW
+===================
+from services.image_finder import search_image, download_screenshot
+
+result = search_image(
+    website_url="https://www.maisai.at/fotos/",
+    reference_image_path="/pfad/zum/bild.jpg",
+)
+
+if result["success"]:
+    print(result["match"]["url"])       # URL des gefundenen Bildes
+    print(result["match"]["distance"])  # 0 = identisch
+    print(result["match"]["position"])  # {"x": 1254, "y": 2354}
+    print(result["match"]["size"])      # "400x400"
+    print(result["images_checked"])     # Anzahl geprüfter Bilder
+    print(result["screenshots"]["desktop"])   # /screenshots/desktop_xxx.png
+    print(result["screenshots"]["viewport"])  # /screenshots/viewport_xxx.png
+
+    # Screenshot herunterladen und lokal speichern
+    png_bytes = download_screenshot(result["screenshots"]["desktop"])
+    with open("desktop.png", "wb") as f:
+        f.write(png_bytes)
+else:
+    # Fehlerfall: HTTP 404
+    print(result["message"])           # "Kein Bild mit Distanz <= 20 gefunden"
+    print(result["images_checked"])    # trotzdem verfügbar
+
+SEARCH-PARAMETER
+=================
+POST /search  (multipart/form-data)
+  url        (string, Pflicht)  – Website-URL zum Durchsuchen
+  reference  (file,   Pflicht)  – Referenzbild (JPG/PNG)
+  threshold  (int,    default=20) – Max Hash-Distanz (0=identisch, <20=ähnlich)
+
+SCREENSHOT-PARAMETER
+=====================
+POST /screenshot  (form-data)
+  url        (string, Pflicht)    – Website-URL
+  mode       (string, default="desktop") – "desktop" oder "viewport"
+  scroll_to  (int,    default=0)  – Scroll-Position in Pixeln (0 = Seitenanfang)
+
+  desktop  = Xvfb-Framebuffer (echte Browseransicht mit Adressleiste)
+  viewport = Playwright-Viewport (nur Seiteninhalt, ohne Browser-Chrome)
+
+API-ANTWORT ERFOLG (HTTP 200)
+==============================
+{
+    "success": true,
+    "job_id": "cda3625f",
+    "match": {
+        "url": "https://...egg0114.400x400.jpg",
+        "distance": 0,
+        "position": {"x": 1254, "y": 2354},
+        "size": "400x400"
+    },
+    "screenshots": {
+        "desktop": "/screenshots/desktop_cda3625f.png",
+        "viewport": "/screenshots/viewport_cda3625f.png"
+    },
+    "images_checked": 30
+}
+
+API-ANTWORT FEHLER (HTTP 404)
+==============================
+{
+    "success": false,
+    "message": "Kein Bild mit Distanz <= 20 gefunden",
+    "images_checked": 30
+}
+
+SCREENSHOT-ANTWORT (HTTP 200)
+==============================
+{
+    "success": true,
+    "job_id": "a1b2c3d4",
+    "mode": "desktop",
+    "screenshot": "/screenshots/desktop_a1b2c3d4.png"
+}
+
+HEALTH-CHECK ANTWORT (GET /health)
+===================================
+{
+    "status": "healthy",
+    "display": ":99",
+    "idle_timeout": 3600,
+    "remaining_seconds": 2847
+}
+
+TODOS
+=====
+1. IMAGE_FINDER_API_URL in Django .env eintragen
+2. IMAGE_FINDER_API_KEY in Django .env eintragen (falls noch nicht vorhanden)
+3. settings.py: beide Variablen laden (os.environ.get)
+4. services/image_finder.py erstellen
+5. Im View/Task aufrufen
+6. Fehlerfall behandeln (result["success"] == False → HTTP 404)
+7. Tipp: Für lange Suchen Celery-Task verwenden (30-60s Laufzeit)
+
+CLOUD RUN ENV-VARIABLEN
+========================
+Auf Cloud Run müssen diese ENV-Variablen gesetzt sein:
+  API_KEY          – der API-Key für Authentifizierung
+  ALLOWED_ORIGINS  – erlaubte CORS-Origins, kommagetrennt (default: "*")
+  IDLE_TIMEOUT     – Sekunden bis Auto-Shutdown (default: 3600)
+  SCREEN_WIDTH     – Xvfb-Breite (default: 1920)
+  SCREEN_HEIGHT    – Xvfb-Höhe (default: 1080)
+
+Update per gcloud CLI:
+  gcloud run services update docker-cloud-app \
+    --region=europe-west1 \
+    --set-env-vars="API_KEY=<key>,ALLOWED_ORIGINS=https://meineseite.at"
+
+HINWEISE
+========
+- Idle-Timeout: Container fährt nach 1h Inaktivität runter (konfigurierbar)
+- Cold Start: Erster Request nach Pause dauert ~10-30 Sekunden
+- Suchzeit: Typisch 30-60 Sekunden pro Request (timeout=120 empfohlen)
+- Screenshots erfordern API-Key → server-seitig downloaden
+- Kosten: Nur bei Nutzung, $0 wenn idle
+- Max Instances: 3 (konfiguriert in deploy.yml)

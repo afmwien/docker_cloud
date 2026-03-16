@@ -3,6 +3,7 @@ FastAPI Server für die 3-Ebenen Bildsuche mit Desktop-Screenshot.
 
 Endpunkte:
   POST /search          - Bildsuche starten (URL + Referenzbild)
+  POST /screenshot      - Reiner Screenshot (ohne Bildvergleich)
   GET  /health          - Health-Check
   GET  /screenshots/{f} - Screenshots abrufen
 """
@@ -305,6 +306,107 @@ async def search_image(
 
     if not result.get("success"):
         return JSONResponse(status_code=404, content=result)
+    return result
+
+
+def _run_screenshot(url: str, mode: str, scroll_to: int, job_id: str) -> dict:
+    """Reiner Screenshot ohne Bildvergleich – läuft in separatem Thread."""
+    from playwright.sync_api import sync_playwright
+
+    screen_w = os.environ.get("SCREEN_WIDTH", "1920")
+    screen_h = os.environ.get("SCREEN_HEIGHT", "1080")
+
+    with sync_playwright() as p:
+        headless = (mode == "viewport")
+        args = ["--no-sandbox"]
+        if not headless:
+            args += ["--start-maximized", f"--window-size={screen_w},{screen_h}", "--disable-gpu"]
+
+        browser = p.chromium.launch(headless=headless, args=args)
+
+        ctx_opts = get_stealth_context_options()
+        if not headless:
+            ctx_opts["no_viewport"] = True
+        ctx = browser.new_context(**ctx_opts)
+        page = ctx.new_page()
+        apply_stealth_settings(page)
+
+        if not headless:
+            time.sleep(1)
+            _maximize_window(DISPLAY)
+            time.sleep(0.5)
+
+        try:
+            page.goto(url, wait_until="networkidle", timeout=30000)
+        except Exception:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+
+        if not headless:
+            _maximize_window(DISPLAY)
+            time.sleep(0.5)
+
+        # Lazy-Load auslösen: einmal komplett durchscrollen
+        page_height = page.evaluate("document.documentElement.scrollHeight")
+        viewport_h = page.evaluate("window.innerHeight")
+        pos = 0
+        while pos < page_height:
+            page.evaluate(f"window.scrollTo(0, {pos})")
+            page.wait_for_timeout(400)
+            pos += viewport_h - 100
+            page_height = page.evaluate("document.documentElement.scrollHeight")
+
+        # Zur gewünschten Position scrollen
+        if scroll_to > 0:
+            page.evaluate(f"window.scrollTo(0, {scroll_to})")
+        else:
+            page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1500)
+
+        if mode == "desktop":
+            filename = f"desktop_{job_id}.png"
+            filepath = OUTPUT_DIR / filename
+            desktop_result = capture_xvfb_desktop(str(filepath), DISPLAY)
+            if not desktop_result.success:
+                browser.close()
+                return {"success": False, "message": "Desktop-Screenshot fehlgeschlagen"}
+        else:
+            filename = f"viewport_{job_id}.png"
+            filepath = OUTPUT_DIR / filename
+            page.screenshot(path=str(filepath), full_page=False)
+
+        browser.close()
+
+    return {
+        "success": True,
+        "job_id": job_id,
+        "mode": mode,
+        "screenshot": f"/screenshots/{filename}",
+    }
+
+
+@app.post("/screenshot", dependencies=[Depends(verify_api_key)])
+async def take_screenshot(
+    url: str = Form(..., description="Website-URL"),
+    mode: str = Form("desktop", description="Screenshot-Modus: 'desktop' oder 'viewport'"),
+    scroll_to: int = Form(0, description="Scroll-Position in Pixeln (0 = Seitenanfang)"),
+):
+    """
+    Reiner Screenshot ohne Bildvergleich.
+    - desktop:  Xvfb-Framebuffer (echte Browseransicht mit Adressleiste)
+    - viewport: Playwright-Viewport (nur Seiteninhalt, ohne Browser-Chrome)
+    """
+    _touch_activity()
+
+    if mode not in ("desktop", "viewport"):
+        raise HTTPException(status_code=400, detail="mode muss 'desktop' oder 'viewport' sein")
+
+    job_id = uuid.uuid4().hex[:8]
+    result = await asyncio.to_thread(_run_screenshot, url, mode, scroll_to, job_id)
+    _touch_activity()
+
+    if not result.get("success"):
+        return JSONResponse(status_code=500, content=result)
     return result
 
 
