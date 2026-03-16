@@ -49,7 +49,14 @@ def take_screenshot(website_url, mode="desktop", scroll_to=0):
     )
     return response.json()
 
+def save_base64_screenshot(b64_data, output_path):
+    """Base64-Screenshot-Daten als PNG-Datei speichern."""
+    import base64
+    with open(output_path, "wb") as f:
+        f.write(base64.b64decode(b64_data))
+
 def download_screenshot(screenshot_path):
+    """Fallback: Screenshot per GET herunterladen (nur solange Container lebt)."""
     response = requests.get(
         f"{settings.IMAGE_FINDER_API_URL}{screenshot_path}",
         headers={"X-API-Key": settings.IMAGE_FINDER_API_KEY},
@@ -59,7 +66,7 @@ def download_screenshot(screenshot_path):
 
 VERWENDUNG IM VIEW
 ===================
-from services.image_finder import search_image, take_screenshot, download_screenshot
+from services.image_finder import search_image, take_screenshot, save_base64_screenshot
 
 # --- Bildsuche ---
 result = search_image(
@@ -73,17 +80,16 @@ if result["success"]:
     print(result["match"]["position"])  # {"x": 1254, "y": 2354}
     print(result["match"]["size"])      # "400x400"
     print(result["images_checked"])     # Anzahl geprüfter Bilder
-    print(result["screenshots"]["desktop"])   # /screenshots/desktop_xxx.png
-    print(result["screenshots"]["viewport"])  # /screenshots/viewport_xxx.png
 
-    # Screenshot herunterladen und lokal speichern
-    png_bytes = download_screenshot(result["screenshots"]["desktop"])
-    with open("desktop.png", "wb") as f:
-        f.write(png_bytes)
+    # Screenshot aus Base64 speichern (EMPFOHLEN – keine Race Condition)
+    if result["screenshots_base64"]["desktop"]:
+        save_base64_screenshot(result["screenshots_base64"]["desktop"], "desktop.png")
+    if result["screenshots_base64"]["viewport"]:
+        save_base64_screenshot(result["screenshots_base64"]["viewport"], "viewport.png")
 else:
     # Fehlerfall: HTTP 404
-    print(result["message"])           # "Kein Bild mit Distanz <= 20 gefunden"
-    print(result["images_checked"])    # trotzdem verfügbar
+    print(result["message"])
+    print(result["images_checked"])
 
 # --- Reiner Screenshot (ohne Bildvergleich) ---
 shot = take_screenshot(
@@ -93,9 +99,8 @@ shot = take_screenshot(
 )
 
 if shot["success"]:
-    png_bytes = download_screenshot(shot["screenshot"])
-    with open("screenshot.png", "wb") as f:
-        f.write(png_bytes)
+    # Base64 speichern (EMPFOHLEN)
+    save_base64_screenshot(shot["screenshot_base64"], "screenshot.png")
 
 SEARCH-PARAMETER
 =================
@@ -129,6 +134,10 @@ API-ANTWORT ERFOLG (HTTP 200)
         "desktop": "/screenshots/desktop_cda3625f.png",
         "viewport": "/screenshots/viewport_cda3625f.png"
     },
+    "screenshots_base64": {
+        "desktop": "iVBORw0KGgo...  (PNG als Base64)",
+        "viewport": "iVBORw0KGgo...  (PNG als Base64)"
+    },
     "images_checked": 30
 }
 
@@ -146,7 +155,8 @@ SCREENSHOT-ANTWORT (HTTP 200)
     "success": true,
     "job_id": "a1b2c3d4",
     "mode": "desktop",
-    "screenshot": "/screenshots/desktop_a1b2c3d4.png"
+    "screenshot": "/screenshots/desktop_a1b2c3d4.png",
+    "screenshot_base64": "iVBORw0KGgo...  (PNG als Base64)"
 }
 
 HEALTH-CHECK ANTWORT (GET /health)
@@ -184,9 +194,10 @@ Update per gcloud CLI:
 
 HINWEISE
 ========
+- Screenshots werden als Base64 in der Response mitgeliefert (→ kein separater Download nötig)
+- GET /screenshots/{filename} existiert als Fallback, ist aber unzuverlässig (Container kann recycelt werden)
 - Idle-Timeout: Container fährt nach 1h Inaktivität runter (konfigurierbar)
 - Cold Start: Erster Request nach Pause dauert ~10-30 Sekunden
 - Suchzeit: Typisch 30-60 Sekunden pro Request (timeout=120 empfohlen)
-- Screenshots erfordern API-Key → server-seitig downloaden
 - Kosten: Nur bei Nutzung, $0 wenn idle
 - Max Instances: 3 (konfiguriert in deploy.yml)

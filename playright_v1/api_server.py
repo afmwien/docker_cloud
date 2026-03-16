@@ -346,6 +346,14 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
 
         browser.close()
 
+    # Base64-Inline: Screenshots direkt in der Response mitgeben
+    desktop_b64 = None
+    viewport_b64 = None
+    if desktop_result.success and screenshot_path.exists():
+        desktop_b64 = base64.b64encode(screenshot_path.read_bytes()).decode("ascii")
+    if viewport_path.exists():
+        viewport_b64 = base64.b64encode(viewport_path.read_bytes()).decode("ascii")
+
     return {
         "success": True,
         "job_id": job_id,
@@ -358,6 +366,10 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         "screenshots": {
             "desktop": f"/screenshots/{screenshot_name}" if desktop_result.success else None,
             "viewport": f"/screenshots/{viewport_name}",
+        },
+        "screenshots_base64": {
+            "desktop": desktop_b64,
+            "viewport": viewport_b64,
         },
         "images_checked": len(images),
     }
@@ -455,11 +467,17 @@ def _run_screenshot(url: str, mode: str, scroll_to: int, job_id: str) -> dict:
 
         browser.close()
 
+    # Base64-Inline: Screenshot direkt in der Response
+    screenshot_b64 = None
+    if filepath.exists():
+        screenshot_b64 = base64.b64encode(filepath.read_bytes()).decode("ascii")
+
     return {
         "success": True,
         "job_id": job_id,
         "mode": mode,
         "screenshot": f"/screenshots/{filename}",
+        "screenshot_base64": screenshot_b64,
     }
 
 
