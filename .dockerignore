@@ -1,0 +1,9 @@
+.gitignore
+.git/
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+*.md
+.github/
