@@ -12,6 +12,7 @@ import sys
 import os
 import uuid
 import time
+import base64
 import subprocess
 import asyncio
 import hmac
@@ -142,11 +143,26 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
     print(f"Referenzbild: format={ref_img.format} size={ref_img.size} mode={ref_img.mode}")
 
     with sync_playwright() as p:
-        # ---- PHASE 1: Headless Crawl ----
+        # ---- PHASE 1: Headless Crawl + Bilder via Browser-Kontext laden ----
         browser_hl = p.chromium.launch(headless=True, args=["--no-sandbox"])
         ctx_hl = browser_hl.new_context(**get_stealth_context_options())
         page_hl = ctx_hl.new_page()
         apply_stealth_settings(page_hl)
+
+        # Response-Interceptor: Bilddaten aus dem Netzwerk abfangen
+        captured_images = {}
+
+        def _on_response(response):
+            try:
+                ct = response.headers.get("content-type", "")
+                if "image" in ct and response.status == 200:
+                    body = response.body()
+                    if len(body) > 500:
+                        captured_images[response.url] = body
+            except Exception:
+                pass
+
+        page_hl.on("response", _on_response)
 
         try:
             page_hl.goto(url, wait_until="networkidle", timeout=30000)
@@ -166,6 +182,8 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         page_hl.evaluate("window.scrollTo(0, 0)")
         page_hl.wait_for_timeout(500)
 
+        print(f"Netzwerk-Interceptor: {len(captured_images)} Bilder abgefangen")
+
         images = page_hl.evaluate("""() => {
             const imgs = [];
             document.querySelectorAll('img').forEach(img => {
@@ -184,51 +202,65 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
             });
             return imgs;
         }""")
-        browser_hl.close()
 
-        # Hash-Vergleich
+        # Hash-Vergleich: Bilder aus Interceptor oder Fallback via Browser-Download
         best_match = None
         checked = 0
         debug_distances = []
         skipped = {"no_src": 0, "small_natural": 0, "download_fail": 0, "open_fail": 0, "small_img": 0}
-        download_headers = {
-            "Accept": "image/jpeg, image/png, image/*;q=0.9, */*;q=0.5",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": url,
-        }
+
+        # Hilfsfunktion: Bild-Bytes holen (Interceptor → Browser-Fetch → requests.get)
+        def _get_image_bytes(src):
+            # 1. Aus Interceptor-Cache
+            if src in captured_images:
+                return captured_images[src]
+            # Auch ohne Query-String oder mit anderem Schema versuchen
+            for cached_url, data in captured_images.items():
+                if cached_url.split("?")[0] == src.split("?")[0]:
+                    return data
+            # 2. Via Playwright evaluate (fetch im Browser-Kontext mit Cookies/Session)
+            try:
+                b64 = page_hl.evaluate("""(url) => {
+                    return fetch(url, {credentials: 'include'})
+                        .then(r => r.arrayBuffer())
+                        .then(buf => {
+                            const bytes = new Uint8Array(buf);
+                            let binary = '';
+                            for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+                            return btoa(binary);
+                        })
+                        .catch(() => null);
+                }""", src)
+                if b64:
+                    return base64.b64decode(b64)
+            except Exception:
+                pass
+            return None
+
         for i, img in enumerate(images):
-            # Bevorzuge Original-src über currentSrc (vermeidet WebP von <picture>)
             src = img["src"] or img["currentSrc"] or img["dataSrc"]
             if not src or src.startswith("data:"):
                 skipped["no_src"] += 1
-                print(f"  [{i}] SKIP: no src or data-uri")
                 continue
-            # naturalWidth=0 bei Lazy-Load → trotzdem versuchen wenn displayWidth > 0
             if img["naturalWidth"] < 10 and img["displayWidth"] < 10:
                 skipped["small_natural"] += 1
-                print(f"  [{i}] SKIP: too small natural={img['naturalWidth']} display={img['displayWidth']} src={src[:80]}")
+                print(f"  [{i}] SKIP: too small natural={img['naturalWidth']} display={img['displayWidth']}")
                 continue
             try:
-                resp = req.get(src, timeout=10, verify=False, headers=download_headers)
-                if resp.status_code != 200:
+                img_bytes = _get_image_bytes(src)
+                if not img_bytes or len(img_bytes) < 500:
                     skipped["download_fail"] += 1
-                    print(f"  [{i}] SKIP: HTTP {resp.status_code} src={src[:80]}")
-                    continue
-                if len(resp.content) < 500:
-                    skipped["download_fail"] += 1
-                    print(f"  [{i}] SKIP: too small ({len(resp.content)} bytes) src={src[:80]}")
+                    print(f"  [{i}] SKIP: no data ({len(img_bytes) if img_bytes else 0} bytes) src={src[:80]}")
                     continue
                 try:
-                    web_img = Image.open(BytesIO(resp.content))
+                    web_img = Image.open(BytesIO(img_bytes))
                 except Exception as img_err:
                     skipped["open_fail"] += 1
                     print(f"  [{i}] SKIP: PIL open failed: {img_err} src={src[:80]}")
                     continue
                 if web_img.size[0] < 10:
                     skipped["small_img"] += 1
-                    print(f"  [{i}] SKIP: decoded too small {web_img.size} src={src[:80]}")
                     continue
-                # Konvertiere beide zu RGB für konsistenten Vergleich
                 web_rgb = web_img.convert("RGB")
                 dist = ref_hash - imagehash.phash(web_rgb, hash_size=16)
                 checked += 1
@@ -240,6 +272,8 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
                 skipped["download_fail"] += 1
                 print(f"  [{i}] FEHLER: {e} src={src[:100]}")
                 continue
+
+        browser_hl.close()
 
         print(f"Hash-Vergleich: {checked}/{len(images)} verglichen, skipped={skipped}, match={best_match is not None}")
 
