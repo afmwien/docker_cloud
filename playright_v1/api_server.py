@@ -138,7 +138,8 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
     from playwright.sync_api import sync_playwright
 
     ref_img = Image.open(BytesIO(ref_data))
-    ref_hash = imagehash.phash(ref_img, hash_size=16)
+    ref_hash = imagehash.phash(ref_img.convert("RGB"), hash_size=16)
+    print(f"Referenzbild: format={ref_img.format} size={ref_img.size} mode={ref_img.mode}")
 
     with sync_playwright() as p:
         # ---- PHASE 1: Headless Crawl ----
@@ -187,26 +188,43 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
 
         # Hash-Vergleich
         best_match = None
+        checked = 0
+        debug_distances = []
         for i, img in enumerate(images):
-            src = img["currentSrc"] or img["src"] or img["dataSrc"]
+            # Bevorzuge Original-src über currentSrc (vermeidet WebP von <picture>)
+            src = img["src"] or img["currentSrc"] or img["dataSrc"]
             if not src or img["naturalWidth"] < 10:
                 continue
             try:
-                resp = req.get(src, timeout=5, verify=False)
+                # Accept-Header: JPEG/PNG bevorzugen, WebP vermeiden (Content Negotiation)
+                resp = req.get(
+                    src, timeout=10, verify=False,
+                    headers={"Accept": "image/jpeg, image/png, image/*;q=0.9, */*;q=0.5"},
+                )
                 if resp.status_code == 200 and len(resp.content) > 500:
                     web_img = Image.open(BytesIO(resp.content))
                     if web_img.size[0] > 10:
-                        dist = ref_hash - imagehash.phash(web_img, hash_size=16)
+                        # Konvertiere beide zu RGB für konsistenten Vergleich
+                        web_rgb = web_img.convert("RGB")
+                        dist = ref_hash - imagehash.phash(web_rgb, hash_size=16)
+                        checked += 1
+                        debug_distances.append({"src": src[:120], "distance": int(dist), "format": web_img.format})
+                        print(f"  [{i}] dist={dist} fmt={web_img.format} size={web_img.size} src={src[:100]}")
                         if dist <= threshold and (best_match is None or dist < best_match["dist"]):
                             best_match = {"index": i, "dist": dist, "img": img, "src": src}
-            except Exception:
+            except Exception as e:
+                print(f"  [{i}] FEHLER: {e} src={src[:100]}")
                 continue
+
+        print(f"Hash-Vergleich abgeschlossen: {checked} Bilder geprüft, best_match={best_match is not None}")
 
         if not best_match:
             return {
                 "success": False,
                 "message": f"Kein Bild mit Distanz <= {threshold} gefunden",
                 "images_checked": len(images),
+                "images_compared": checked,
+                "distances": sorted(debug_distances, key=lambda d: d["distance"])[:10],
             }
 
         # ---- PHASE 2+3: Headed Browser → Desktop-Screenshot ----

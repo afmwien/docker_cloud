@@ -59,8 +59,9 @@ def download_screenshot(screenshot_path):
 
 VERWENDUNG IM VIEW
 ===================
-from services.image_finder import search_image, download_screenshot
+from services.image_finder import search_image, take_screenshot, download_screenshot
 
+# --- Bildsuche ---
 result = search_image(
     website_url="https://www.maisai.at/fotos/",
     reference_image_path="/pfad/zum/bild.jpg",
@@ -83,6 +84,18 @@ else:
     # Fehlerfall: HTTP 404
     print(result["message"])           # "Kein Bild mit Distanz <= 20 gefunden"
     print(result["images_checked"])    # trotzdem verfügbar
+
+# --- Reiner Screenshot (ohne Bildvergleich) ---
+shot = take_screenshot(
+    website_url="https://www.maisai.at/fotos/",
+    mode="desktop",     # oder "viewport"
+    scroll_to=0,        # Pixel von oben
+)
+
+if shot["success"]:
+    png_bytes = download_screenshot(shot["screenshot"])
+    with open("screenshot.png", "wb") as f:
+        f.write(png_bytes)
 
 SEARCH-PARAMETER
 =================
