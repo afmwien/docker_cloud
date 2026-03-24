@@ -339,6 +339,7 @@ class WebsiteImageFinder:
         max_pages: int = 500,
         context_pixels: int = 150,
         chrome_profile_path: Optional[Path] = None,
+        skip_search: bool = False,
     ) -> FinalResult:
         """
         Hauptmethode: Sucht Bild und erstellt Screenshot.
@@ -350,35 +351,53 @@ class WebsiteImageFinder:
             max_pages: Maximale Seiten für Headless-Suche
             context_pixels: Pixel Kontext um das Bild
             chrome_profile_path: Pfad zum Chrome-Profil (optional)
+            skip_search: Wenn True, überspringe Headless-Suche und gehe direkt zur URL
 
         Returns:
             FinalResult
         """
         result = FinalResult()
 
-        # ============================================
-        # PHASE 1: Headless-Suche
-        # ============================================
-        self.logger.info("")
-        self.logger.info("╔" + "═" * 58 + "╗")
-        self.logger.info("║  PHASE 1: HEADLESS-SUCHE                                ║")
-        self.logger.info("╚" + "═" * 58 + "╝")
+        if skip_search:
+            # Direkt zur URL navigieren ohne Suche
+            self.logger.info("")
+            self.logger.info("╔" + "═" * 58 + "╗")
+            self.logger.info("║  DIREKTER MODUS (ohne Suche)                            ║")
+            self.logger.info("╚" + "═" * 58 + "╝")
 
-        crawler = HeadlessCrawler(
-            reference_image=reference_image,
-            logger=self.logger
-        )
+            # Fake SearchResult für Kompatibilität
+            search_result = SearchResult(
+                found=True,
+                url=website_url,
+                image_src="",
+                position_y=300,  # Standard-Position
+                height=200,
+            )
+            result.search_result = search_result
+        else:
+            # ============================================
+            # PHASE 1: Headless-Suche
+            # ============================================
+            self.logger.info("")
+            self.logger.info("╔" + "═" * 58 + "╗")
+            self.logger.info("║  PHASE 1: HEADLESS-SUCHE                                ║")
+            self.logger.info("╚" + "═" * 58 + "╝")
 
-        search_result = crawler.search(
-            base_url=website_url,
-            max_pages=max_pages
-        )
+            crawler = HeadlessCrawler(
+                reference_image=reference_image,
+                logger=self.logger
+            )
 
-        result.search_result = search_result
+            search_result = crawler.search(
+                base_url=website_url,
+                max_pages=max_pages
+            )
 
-        if not search_result.found:
-            result.error = f"Bild nicht gefunden nach {search_result.pages_searched} Seiten"
-            return result
+            result.search_result = search_result
+
+            if not search_result.found:
+                result.error = f"Bild nicht gefunden nach {search_result.pages_searched} Seiten"
+                return result
 
         # ============================================
         # PHASE 2: Sichtbarer Browser + Screenshot
@@ -529,8 +548,11 @@ class WebsiteImageFinder:
                 # Banner-Blocker installieren (MutationObserver der neue Banner sofort entfernt)
                 self._install_banner_blocker(page)
 
+                # Warten statt erstem Screenshot
+                time.sleep(2)
+
                 # Screenshot mit Validierung (mehrere Versuche mit feinen Anpassungen)
-                scroll_offsets = [0, -50, +50, -100, +100, -150]
+                scroll_offsets = [-50, +50, -100, +100, -150]
                 base_scroll = scroll_to
 
                 for attempt, offset in enumerate(scroll_offsets[:max_attempts], 1):
@@ -1112,6 +1134,7 @@ def find_image_on_website(
     website_url: str,
     output_path: str | Path,
     max_pages: int = 500,
+    skip_search: bool = False,
 ) -> FinalResult:
     """
     Convenience-Funktion für einfache Nutzung.
@@ -1121,6 +1144,7 @@ def find_image_on_website(
         website_url: URL der Website
         output_path: Pfad für Screenshot
         max_pages: Max. Seiten für Suche
+        skip_search: Wenn True, überspringe Headless-Suche und gehe direkt zur URL
 
     Returns:
         FinalResult
@@ -1131,6 +1155,7 @@ def find_image_on_website(
         website_url=website_url,
         output_path=Path(output_path),
         max_pages=max_pages,
+        skip_search=skip_search,
     )
 
 

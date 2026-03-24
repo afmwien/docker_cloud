@@ -198,6 +198,97 @@ HINWEISE
 ========
 - Screenshots werden als Base64 in der Response mitgeliefert (→ kein separater Download nötig)
 - GET /screenshots/{filename} existiert als Fallback, ist aber unzuverlässig (Container kann recycelt werden)
+
+================================================================================
+  LOGIN-SESSION MANAGEMENT (für Facebook, Instagram, etc.)
+================================================================================
+
+Für Websites die Login-Overlays anzeigen (z.B. Facebook), kann eine persistente
+Browser-Session eingerichtet werden. Die Cookies bleiben über Container-Neustarts
+erhalten.
+
+WORKFLOW
+========
+1. Login-Session starten
+2. Via noVNC (Port 6080) verbinden und manuell einloggen
+3. Login-Session beenden
+4. Zukünftige Screenshots nutzen automatisch die gespeicherten Cookies
+
+ENDPOINTS
+=========
+POST /login-session/start   – Browser öffnen zum manuellen Login
+POST /login-session/stop    – Browser schließen (Cookies werden gespeichert)
+GET  /login-session/status  – Session-Status und Cookie-Info
+DELETE /login-session/clear – Alle Cookies/Profile löschen
+
+BEISPIEL: FACEBOOK-LOGIN
+========================
+
+# 1. Login-Session starten
+curl -X POST "https://docker-cloud-app-14602204356.europe-west1.run.app/login-session/start" \
+  -H "X-API-Key: <API_KEY>" \
+  -F "url=https://www.facebook.com/login"
+
+# Antwort:
+{
+    "success": true,
+    "message": "Login-Session gestartet",
+    "instructions": [
+        "1. Öffne noVNC im Browser: http://<host>:6080",
+        "2. Logge dich manuell bei der Website ein",
+        "3. Rufe /login-session/stop auf wenn fertig"
+    ],
+    "url": "https://www.facebook.com/login",
+    "novnc_hint": "Verbinde dich via Port 6080 (noVNC)"
+}
+
+# 2. Öffne im Browser: http://<host>:6080
+#    → Du siehst den Desktop mit Chromium
+#    → Logge dich bei Facebook ein
+#    → Schließe das Chromium-Fenster NICHT!
+
+# 3. Login-Session beenden
+curl -X POST "https://docker-cloud-app-14602204356.europe-west1.run.app/login-session/stop" \
+  -H "X-API-Key: <API_KEY>"
+
+# Antwort:
+{
+    "success": true,
+    "message": "Login-Session beendet. Cookies wurden gespeichert."
+}
+
+# 4. Session-Status prüfen
+curl "https://docker-cloud-app-14602204356.europe-west1.run.app/login-session/status" \
+  -H "X-API-Key: <API_KEY>"
+
+# Antwort:
+{
+    "session_active": false,
+    "profile_exists": true,
+    "cookies_exist": true,
+    "cookies_file_size": 262144,
+    "known_logins": ["cookies_present"],
+    "profile_path": "/app/data/chrome_profile"
+}
+
+# 5. (Optional) Alle Cookies löschen
+curl -X DELETE "https://docker-cloud-app-14602204356.europe-west1.run.app/login-session/clear" \
+  -H "X-API-Key: <API_KEY>"
+
+DOCKER-COMPOSE VOLUME
+=====================
+Damit Cookies über Container-Neustarts erhalten bleiben, muss das Volume
+gemountet sein:
+
+  volumes:
+    - ./data:/app/data
+
+WICHTIG
+=======
+- Bei Cloud Run: noVNC (Port 6080) ist NICHT erreichbar!
+  → Für Cloud Run muss das Profil lokal erstellt und als Volume deployed werden
+  → Oder: Separaten Login-Container mit noVNC-Zugang betreiben
+- Für lokales Docker: noVNC funktioniert direkt via http://localhost:6080
 - Idle-Timeout: Container fährt nach 1h Inaktivität runter (konfigurierbar)
 - Cold Start: Erster Request nach Pause dauert ~10-30 Sekunden
 - Suchzeit: Typisch 30-60 Sekunden pro Request (timeout=120 empfohlen)

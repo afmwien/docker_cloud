@@ -16,6 +16,7 @@ services:
       - SCREEN_DEPTH=24
     volumes:
       - ./output:/app/output
+      - ./data:/app/data  # Persistentes Browser-Profil für Login-Sessions
     deploy:
       resources:
         limits:

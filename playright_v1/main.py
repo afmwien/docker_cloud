@@ -12,17 +12,18 @@ from image_finder import find_image_on_website
 
 def main():
     print("Starte 2-Phasen-Bildsuche...")
-    
+
     result = find_image_on_website(
-        reference_image='data/reference_images/csm_Stefan_Wernhart_7ff580844a.webp',
-        website_url='https://www.ehl.at/ueber-ehl/team',
-        output_path='output/screenshots/ehl_team.png',
-        max_pages=10
+        reference_image='data/reference_images/facebook_profile.jpg',
+        website_url='https://www.facebook.com/profile.php?id=61565079419157',
+        output_path='output/screenshots/facebook_profile.png',
+        max_pages=10,
+        skip_search=True,  # Direkt zur URL, ohne Suche
     )
 
     print()
     print('=' * 60)
-    print('ERGEBNIS')  
+    print('ERGEBNIS')
     print('=' * 60)
     print(f'Erfolg: {result.success}')
     if result.search_result:

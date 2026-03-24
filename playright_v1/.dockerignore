@@ -28,6 +28,11 @@ screenshots/
 .venv/
 venv/
 
+# Chrome Profile Lock-Dateien
+data/chrome_profile/SingletonLock
+data/chrome_profile/SingletonSocket
+data/chrome_profile/SingletonCookie
+
 # Sonstiges
 *.md
 *.log
