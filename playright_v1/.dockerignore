@@ -23,6 +23,7 @@ docker-compose.yml
 .dockerignore
 
 # Lokale Daten (werden via Volume gemountet oder per API hochgeladen)
+data/
 output/
 screenshots/
 .venv/
