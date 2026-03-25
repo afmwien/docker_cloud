@@ -465,6 +465,9 @@ class WebsiteImageFinder:
                 headless=False,
                 # channel="chrome" entfernt - nutzt Playwright-Chromium (Docker-kompatibel)
                 args=[
+                    "--no-sandbox",  # WICHTIG für Docker!
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
                     "--start-maximized",
                     "--disable-blink-features=AutomationControlled",
                     "--disable-infobars",
@@ -482,7 +485,7 @@ class WebsiteImageFinder:
                     "--test-type",
                     "--disable-gpu",
                 ],
-                ignore_default_args=["--enable-automation", "--no-sandbox"],
+                ignore_default_args=["--enable-automation"],
                 no_viewport=True,
             )
 
