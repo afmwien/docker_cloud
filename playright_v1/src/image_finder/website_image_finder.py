@@ -458,12 +458,12 @@ class WebsiteImageFinder:
 
         with sync_playwright() as p:
             # Sichtbaren Browser mit persistentem Profil starten
-            self.logger.info(f"Starte Chrome mit Profil: {profile_path}")
+            self.logger.info(f"Starte Browser mit Profil: {profile_path}")
 
             context = p.chromium.launch_persistent_context(
                 user_data_dir=str(profile_path),
                 headless=False,
-                channel="chrome",
+                # channel="chrome" entfernt - nutzt Playwright-Chromium (Docker-kompatibel)
                 args=[
                     "--start-maximized",
                     "--disable-blink-features=AutomationControlled",
