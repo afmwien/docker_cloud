@@ -29,10 +29,21 @@ from PIL import Image
 import imagehash
 import requests as req
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Projekt-Root für Imports
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+sys.path.insert(0, str(PROJECT_ROOT))
 
+# Zentrale Config importieren
+from config import get_chrome_profile_path, settings
+
+# Browser-Module
 from browser.stealth import apply_stealth_settings, get_stealth_context_options
 from screenshot.xvfb_screenshot import capture_xvfb_desktop
+
+# Cookie & Overlay Handler
+from cookie_handler.cookie_handler import CookieHandler, CookieHandlerConfig
+from overlay_cleaner.overlay_cleaner import OverlayCleaner, OverlayCleanerConfig
 
 # Logging-Konfiguration
 logging.basicConfig(
@@ -70,9 +81,11 @@ DISPLAY = os.environ.get("DISPLAY", ":99")
 OUTPUT_DIR = Path("/app/output/screenshots")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Persistentes Browser-Profil (für Login-Sessions)
-CHROME_PROFILE_DIR = Path("/app/data/chrome_profile")
+# Persistentes Browser-Profil aus zentraler Config
+# Im Docker: /app/data/chrome_profile, lokal: data/chrome_profile
+CHROME_PROFILE_DIR = get_chrome_profile_path()
 CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+logger.info(f"Chrome-Profil: {CHROME_PROFILE_DIR}")
 
 # Aktive Login-Sessions verwalten
 _active_login_session = None  # Chromium-Prozess für manuelle Logins
@@ -333,6 +346,9 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--disable-notifications",
+                "--disable-popup-blocking",
             ],
             **ctx_opts,
         )
@@ -349,6 +365,41 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         except Exception:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2000)
+
+        # ============================================
+        # COOKIE-HANDLER (wie website_image_finder.py)
+        # ============================================
+        try:
+            cookie_config = CookieHandlerConfig(
+                detection_timeout_ms=3000,
+                click_timeout_ms=2000,
+            )
+            cookie_handler = CookieHandler(page, config=cookie_config)
+            cookie_result = cookie_handler.handle_consent()
+            if cookie_result.success:
+                logger.info(f"[{job_id}] Cookie-Handler: {cookie_result.action_taken}")
+            page.wait_for_timeout(500)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Cookie-Handler Fehler: {e}")
+
+        # ============================================
+        # OVERLAY-CLEANER (wie website_image_finder.py)
+        # ============================================
+        try:
+            overlay_config = OverlayCleanerConfig(
+                max_loops=3,
+                use_cookie_handler=False,
+            )
+            overlay_cleaner = OverlayCleaner(page, config=overlay_config)
+            overlay_result = overlay_cleaner.clean()
+            if overlay_result.overlays_removed > 0:
+                logger.info(f"[{job_id}] Overlay-Cleaner: {overlay_result.overlays_removed} entfernt")
+            page.wait_for_timeout(500)
+        except Exception as e:
+            logger.warning(f"[{job_id}] Overlay-Cleaner Fehler: {e}")
+
+        # Banner-Blocker installieren
+        _install_banner_blocker(page)
 
         # Nochmals maximieren nach dem Laden
         _maximize_window(DISPLAY)
@@ -368,6 +419,9 @@ def _run_search(url: str, ref_data: bytes, threshold: int, job_id: str) -> dict:
         scroll_to = max(0, img_y - (viewport_h - img_h) // 2)
         page.evaluate(f"window.scrollTo(0, {scroll_to})")
         page.wait_for_timeout(2000)
+
+        # Nochmal Overlays entfernen (können nach Scroll erscheinen)
+        _quick_remove_overlays(page)
 
         screenshot_name = f"desktop_{job_id}.png"
         screenshot_path = OUTPUT_DIR / screenshot_name
@@ -471,122 +525,210 @@ def _cleanup_chrome_locks():
             pass
 
 
+def _install_banner_blocker(page):
+    """
+    Installiert einen MutationObserver der alle neuen Banner/Overlays
+    sofort versteckt. Bleibt aktiv solange die Seite offen ist.
+    (Identisch mit website_image_finder.py)
+    """
+    try:
+        page.evaluate("""
+            () => {
+                // Bereits installiert?
+                if (window.__bannerBlockerInstalled) return;
+                window.__bannerBlockerInstalled = true;
+
+                const hideElement = (el) => {
+                    el.style.setProperty('display', 'none', 'important');
+                    el.style.setProperty('visibility', 'hidden', 'important');
+                    el.style.setProperty('opacity', '0', 'important');
+                    el.style.setProperty('pointer-events', 'none', 'important');
+                    el.style.setProperty('position', 'absolute', 'important');
+                    el.style.setProperty('top', '-9999px', 'important');
+                };
+
+                const bannerPatterns = [
+                    'cookie', 'consent', 'gdpr', 'privacy', 'banner',
+                    'modal', 'popup', 'overlay', 'notice', 'cmp'
+                ];
+
+                const isBanner = (el) => {
+                    const id = (el.id || '').toLowerCase();
+                    const cls = (el.className || '').toLowerCase();
+                    const rect = el.getBoundingClientRect();
+
+                    // Zu klein = kein Banner
+                    if (rect.width < 100 || rect.height < 50) return false;
+
+                    // Pattern-Check
+                    for (const p of bannerPatterns) {
+                        if (id.includes(p) || cls.includes(p)) return true;
+                    }
+
+                    // Fixed/Sticky mit hohem z-index
+                    const style = getComputedStyle(el);
+                    const zIndex = parseInt(style.zIndex) || 0;
+                    if ((style.position === 'fixed' || style.position === 'sticky') &&
+                        zIndex > 1000 &&
+                        rect.width > window.innerWidth * 0.5) {
+                        return true;
+                    }
+
+                    return false;
+                };
+
+                // Observer für neue Elemente
+                const observer = new MutationObserver((mutations) => {
+                    for (const mutation of mutations) {
+                        for (const node of mutation.addedNodes) {
+                            if (node.nodeType === 1) { // Element node
+                                if (isBanner(node)) {
+                                    hideElement(node);
+                                }
+                                // Auch Children prüfen
+                                node.querySelectorAll?.('*').forEach(child => {
+                                    if (isBanner(child)) hideElement(child);
+                                });
+                            }
+                        }
+                    }
+                });
+
+                observer.observe(document.body, {
+                    childList: true,
+                    subtree: true
+                });
+
+                // Body-Scroll sicherstellen
+                const styleSheet = document.createElement('style');
+                styleSheet.textContent = `
+                    html, body {
+                        overflow: auto !important;
+                        position: static !important;
+                    }
+                `;
+                document.head.appendChild(styleSheet);
+
+                console.log('[BannerBlocker] Installiert');
+            }
+        """)
+        logger.debug("Banner-Blocker installiert")
+    except Exception as e:
+        logger.debug(f"Banner-Blocker Fehler: {e}")
+
+
+def _quick_remove_overlays(page):
+    """
+    Schnelle Entfernung von Cookie-Bannern und Overlays.
+    Wird mehrfach aufgerufen um verzögerte Banner zu erwischen.
+    (Identisch mit website_image_finder.py)
+    """
+    try:
+        page.evaluate("""
+            () => {
+                const hideElement = (el) => {
+                    el.style.setProperty('display', 'none', 'important');
+                    el.style.setProperty('visibility', 'hidden', 'important');
+                    el.style.setProperty('opacity', '0', 'important');
+                    el.style.setProperty('pointer-events', 'none', 'important');
+                    el.style.setProperty('position', 'absolute', 'important');
+                    el.style.setProperty('top', '-9999px', 'important');
+                };
+
+                const cookieSelectors = [
+                    '[class*="cookie"]', '[class*="consent"]', '[class*="gdpr"]',
+                    '[class*="privacy"]', '[class*="banner"]', '[class*="notice"]',
+                    '[id*="cookie"]', '[id*="consent"]', '[id*="gdpr"]', '[id*="privacy"]',
+                    '#CybotCookiebotDialog', '#onetrust-consent-sdk', '.cc-window',
+                    '.cky-consent-container', '#usercentrics-root', '.sp-message-container',
+                    '#didomi-host', '.fc-consent-root', '[class*="modal"]',
+                    '[class*="popup"]', '[class*="overlay"]'
+                ];
+
+                cookieSelectors.forEach(sel => {
+                    try {
+                        document.querySelectorAll(sel).forEach(el => {
+                            const style = getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            if (style.display !== 'none' &&
+                                style.visibility !== 'hidden' &&
+                                rect.width > 100 && rect.height > 50) {
+                                hideElement(el);
+                            }
+                        });
+                    } catch(e) {}
+                });
+
+                // Fixed/Sticky Banner
+                document.querySelectorAll('*').forEach(el => {
+                    try {
+                        const style = getComputedStyle(el);
+                        const rect = el.getBoundingClientRect();
+                        if ((style.position === 'fixed' || style.position === 'sticky') &&
+                            rect.width > window.innerWidth * 0.5 && rect.height > 100) {
+                            const zIndex = parseInt(style.zIndex) || 0;
+                            if (zIndex > 1000) hideElement(el);
+                        }
+                    } catch(e) {}
+                });
+
+                // Body-Scroll aktivieren
+                document.body.style.overflow = 'auto';
+                document.documentElement.style.overflow = 'auto';
+            }
+        """)
+    except Exception:
+        pass
+
+
 def _run_screenshot(url: str, mode: str, scroll_to: int, full_page: bool, job_id: str, use_profile: bool = True) -> dict:
-    """Reiner Screenshot ohne Bildvergleich – läuft in separatem Thread."""
+    """
+    Reiner Screenshot ohne Bildvergleich – läuft in separatem Thread.
+
+    VEREINHEITLICHT: Nutzt die gleichen Module wie website_image_finder.py:
+    - CookieHandler für Cookie-Banner
+    - OverlayCleaner für Overlays/Popups
+    - Banner-Blocker für verzögerte Elemente
+    """
     from playwright.sync_api import sync_playwright
-    from src.screenshot.xvfb_screenshot import capture_xvfb_desktop
 
     # Thread-Lock: Nur ein Screenshot gleichzeitig
     with _screenshot_lock:
         screen_w = os.environ.get("SCREEN_WIDTH", "1920")
         screen_h = os.environ.get("SCREEN_HEIGHT", "1080")
 
-        # Profil-Verzeichnis sicherstellen
+        # WICHTIG: Alte Chrome-Prozesse und Locks bereinigen
+        _kill_all_chrome_processes()
+        _cleanup_chrome_locks()
         CHROME_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Desktop-Modus mit Profil: Direkten Chrome-Start verwenden (wie Login-Session)
-        # Damit werden die gespeicherten Cookies/Session korrekt übernommen
-        if mode == "desktop" and use_profile:
-            try:
-
-                # WICHTIG: Alle alten Chrome-Prozesse beenden und Lock-Dateien entfernen
-                _kill_all_chrome_processes()
-                _cleanup_chrome_locks()
-
-                # Chrome mit Profil starten
-                env = {
-                    **os.environ,
-                    "DISPLAY": DISPLAY,
-                    "GOOGLE_API_KEY": "no",
-                    "GOOGLE_DEFAULT_CLIENT_ID": "no",
-                    "GOOGLE_DEFAULT_CLIENT_SECRET": "no",
-                }
-                chromium_path = _get_chromium_path()
-
-                cmd = [
-                    chromium_path,
-                    f"--user-data-dir={CHROME_PROFILE_DIR}",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--start-maximized",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-gpu",
-                    "--disable-infobars",
-                    "--disable-notifications",
-                    url,
-                ]
-                print(f"Starting Chrome with cmd: {' '.join(cmd)}")
-                proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                print(f"Chrome started with PID: {proc.pid}")
-
-                # Warten und maximieren - Facebook braucht länger zum Laden (15 Sekunden wie manueller Test)
-                time.sleep(12)
-
-                # Prüfen ob Chrome noch läuft
-                poll_result = proc.poll()
-                print(f"Chrome poll after 12s: {poll_result} (None = still running)")
-                if poll_result is not None:
-                    stderr_output = proc.stderr.read().decode() if proc.stderr else "no stderr"
-                    print(f"Chrome stderr: {stderr_output[:1000]}")
-
-                _maximize_window(DISPLAY)
-                time.sleep(3)
-
-                # Double-Screenshot: Erster Screenshot triggert Lazy-Loading der Bilder
-                screenshot_name = f"desktop_{job_id}.png"
-                screenshot_path = OUTPUT_DIR / screenshot_name
-                capture_xvfb_desktop(str(screenshot_path), DISPLAY)
-                print("First screenshot taken, waiting for images to load...")
-
-                # Warten bis Bilder nachgeladen sind (10 Sekunden für langsame Facebook-Bilder)
-                time.sleep(10)
-
-                # Zweiter Screenshot - jetzt sollten alle Bilder geladen sein
-                result = capture_xvfb_desktop(str(screenshot_path), DISPLAY)
-                print("Second screenshot taken")
-
-                # Browser schließen
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-
-                if result.success:
-                    with open(screenshot_path, "rb") as f:
-                        screenshot_b64 = base64.b64encode(f.read()).decode()
-                    return {
-                        "success": True,
-                        "job_id": job_id,
-                        "mode": mode,
-                        "full_page": full_page,
-                        "screenshot": f"/screenshots/{screenshot_name}",
-                        "screenshot_base64": screenshot_b64,
-                    }
-                else:
-                    return {"success": False, "error": result.error}
-
-            except Exception as e:
-                # Bei Fehler auch Chrome beenden
-                _kill_all_chrome_processes()
-                return {"success": False, "error": str(e)}
-
-        # Viewport-Modus oder ohne Profil: Playwright verwenden
         with sync_playwright() as p:
             headless = (mode == "viewport")
+
+            # Einheitliche Browser-Args (wie in website_image_finder.py)
             args = [
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--disable-notifications",
+                "--disable-popup-blocking",
+                "--disable-features=ExternalProtocolDialogShowAlwaysOpenCheckbox",
+                "--autoplay-policy=no-user-gesture-required",
+                "--deny-permission-prompts",
+                "--test-type",
             ]
             if not headless:
                 args += ["--start-maximized", f"--window-size={screen_w},{screen_h}", "--disable-gpu"]
 
-            # Desktop-Modus ohne Profil: Playwright persistent context
-            if not headless and use_profile:
-                ctx_opts = get_stealth_context_options()
+            # Context-Optionen mit Stealth
+            ctx_opts = get_stealth_context_options()
+            if not headless:
                 ctx_opts["no_viewport"] = True
                 ctx_opts.pop("viewport", None)
+
+            # Persistent Context für Profile (Desktop-Modus)
+            if use_profile and not headless:
                 ctx = p.chromium.launch_persistent_context(
                     user_data_dir=str(CHROME_PROFILE_DIR),
                     headless=False,
@@ -594,29 +736,65 @@ def _run_screenshot(url: str, mode: str, scroll_to: int, full_page: bool, job_id
                     **ctx_opts,
                 )
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                browser = None
             else:
                 browser = p.chromium.launch(headless=headless, args=args)
-                ctx_opts = get_stealth_context_options()
-                if not headless:
-                    ctx_opts["no_viewport"] = True
-                    ctx_opts.pop("viewport", None)
                 ctx = browser.new_context(**ctx_opts)
                 page = ctx.new_page()
 
             apply_stealth_settings(page)
 
+            # Fenster maximieren (Desktop-Modus)
             if not headless:
                 time.sleep(1)
                 _maximize_window(DISPLAY)
                 time.sleep(0.5)
 
+            # Seite laden
+            logger.info(f"[{job_id}] Lade URL: {url[:60]}...")
             try:
                 page.goto(url, wait_until="networkidle", timeout=30000)
             except Exception:
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(2000)
 
+            # ============================================
+            # COOKIE-HANDLER (wie website_image_finder.py)
+            # ============================================
+            try:
+                cookie_config = CookieHandlerConfig(
+                    detection_timeout_ms=3000,
+                    click_timeout_ms=2000,
+                )
+                cookie_handler = CookieHandler(page, config=cookie_config)
+                cookie_result = cookie_handler.handle_consent()
+                if cookie_result.success:
+                    logger.info(f"[{job_id}] Cookie-Handler: {cookie_result.action_taken}")
+                page.wait_for_timeout(500)
+            except Exception as e:
+                logger.warning(f"[{job_id}] Cookie-Handler Fehler: {e}")
+
+            # ============================================
+            # OVERLAY-CLEANER (wie website_image_finder.py)
+            # ============================================
+            try:
+                overlay_config = OverlayCleanerConfig(
+                    max_loops=3,
+                    use_cookie_handler=False,  # Schon erledigt
+                )
+                overlay_cleaner = OverlayCleaner(page, config=overlay_config)
+                overlay_result = overlay_cleaner.clean()
+                if overlay_result.overlays_removed > 0:
+                    logger.info(f"[{job_id}] Overlay-Cleaner: {overlay_result.overlays_removed} entfernt")
+                page.wait_for_timeout(500)
+            except Exception as e:
+                logger.warning(f"[{job_id}] Overlay-Cleaner Fehler: {e}")
+
+            # ============================================
+            # BANNER-BLOCKER installieren
+            # ============================================
+            _install_banner_blocker(page)
+
+            # Fenster nochmal maximieren nach Laden
             if not headless:
                 _maximize_window(DISPLAY)
                 time.sleep(0.5)
@@ -637,6 +815,9 @@ def _run_screenshot(url: str, mode: str, scroll_to: int, full_page: bool, job_id
             else:
                 page.evaluate("window.scrollTo(0, 0)")
             page.wait_for_timeout(1500)
+
+            # Nochmal Overlays entfernen (können nach Scroll erscheinen)
+            _quick_remove_overlays(page)
 
             if mode == "desktop":
                 filename = f"desktop_{job_id}.png"
